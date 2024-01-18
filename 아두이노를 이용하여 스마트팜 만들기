@@ -1,0 +1,169 @@
+#include "DHT.h"
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+#include <BH1750.h>
+#include <ArduinoJson.h>
+
+#define DHTPIN 2
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+unsigned long time1 = 0;
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// 블루투스 통신을 위한 핀 정의
+#define BT_RXD 8
+#define BT_TXD 7
+SoftwareSerial BTSerial(BT_RXD, BT_TXD);
+
+BH1750 lightMeter;
+
+#define A_IA 5     // 모터드라이버 A 5번 핀에 연결
+#define A_IB 6     // 모터드라이버 B 6번 핀에 연결
+int waterpin = A0; // 수위 센서 A0에 연결
+int relay1 = 9;    // 릴레이1 제어 핀 (LED)
+int relay2 = 4;    // 릴레이2 제어 핀 (환기팬)
+
+enum PumpState {
+  PUMP_OFF,       // 펌프 꺼짐 상태
+  PUMP_ON         // 펌프 켜짐 상태
+};
+
+PumpState pumpState = PUMP_OFF; // 펌프 초기 상태
+unsigned long pumpStartTime = 0; // 펌프 동작 시작 시간
+
+void setup() {
+  Serial.begin(9600);
+  BTSerial.begin(9600);
+  dht.begin(); // 온습도 센서 초기화
+  lcd.init();  // LCD 초기화
+  lcd.backlight(); // LCD 백라이트 켜기
+  lightMeter.begin(); // 조도 센서 초기화
+  Serial.println(F("Sensors Test begin"));
+  
+  // 핀 초기화
+  pinMode(relay1, OUTPUT);
+  pinMode(relay2, OUTPUT);
+  pinMode(A_IA, OUTPUT);
+  pinMode(A_IB, OUTPUT);
+  
+  
+  digitalWrite(A_IA, HIGH);
+  digitalWrite(A_IB, LOW);
+  pumpStartTime = millis(); // 현재 시간으로 초기화
+}
+
+void sendSensorDataToAppInventor(float temperature, float humidity, float light) {
+  // JSON 객체 생성
+  DynamicJsonDocument doc(200);
+  doc["temp"] = String(temperature, 1);  // 온도를 소수점 첫번째까지 나타내도록 수정
+  doc["humidity"] = String(static_cast<int>(humidity));  // 습도를 정수로 나타내도록 수정
+  doc["light"] = String(light, 1);  // 조도를 소수점 첫번째까지 나타내도록 수정
+
+  // JSON 객체를 문자열로 변환
+  String jsonString;
+  serializeJson(doc, jsonString);
+
+  // Bluetooth로 전송
+  BTSerial.println(jsonString);
+}
+
+void relayControl(char command, int relayPin) {
+  // 릴레이 제어 함수
+  if (relayPin == relay1) {
+    // 첫 번째 릴레이 (LED) 제어
+    if (command == 'a') {
+      digitalWrite(relayPin, HIGH);
+      Serial.println("LED ON");
+    } else if (command == 'b') {
+      digitalWrite(relayPin, LOW);
+      Serial.println("LED OFF");
+    }
+  } else if (relayPin == relay2) {
+    // 두 번째 릴레이 (환기팬) 제어
+    if (command == 'e') {
+      digitalWrite(relayPin, HIGH);
+      Serial.println("Fan ON");
+    } else if (command == 'f') {
+      digitalWrite(relayPin, LOW);
+      Serial.println("Fan OFF");
+    }
+  }
+}
+
+void loop() {
+  // 블루투스 통신으로 릴레이 제어
+  if (BTSerial.available()) {
+    char command = BTSerial.read();
+    Serial.println(command);
+
+    // 첫 번째 릴레이 (LED) 및 두 번째 릴레이 (환기팬) 제어
+    relayControl(command, relay1);
+    relayControl(command, relay2);
+  }
+  delay(100);
+  
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  unsigned long time2 = millis();
+  delay(100);
+  if ((time2 - time1) > 999) {
+    Serial.print(t);
+    Serial.print(h);
+    time1 = time2;
+  }
+  lcd.clear();
+
+  if (isnan(h) || isnan(t)) {
+    lcd.setCursor(0, 0);
+    lcd.print("unknown");
+    return;
+  }
+
+  lcd.setCursor(0, 0);
+  lcd.print("T=");
+  lcd.print(t);
+  lcd.print("C ");
+
+  lcd.setCursor(0, 1);
+  lcd.print("H=");
+  lcd.print(h);
+  lcd.print("% ");
+
+  // 조도 센서 읽기
+  float lux = lightMeter.readLightLevel();
+  Serial.print("Light: ");
+  Serial.print(lux);
+  Serial.println(" lux");
+
+  // MIT App Inventor로 센서 데이터 전송
+  sendSensorDataToAppInventor(t, h, lux);
+
+  delay(100);
+
+  int waterLevel = analogRead(waterpin);
+
+  // 수위센서 값을 시리얼 모니터로 출력
+  Serial.print("Water Level: ");
+  Serial.println(waterLevel);
+
+  // 수위센서 값이 560 이상인 경우 워터펌프 멈춤
+  if (waterLevel >= 560) {
+    digitalWrite(A_IA, LOW);
+    digitalWrite(A_IB, LOW);
+    pumpState = PUMP_OFF;
+    Serial.println("Water Pump OFF");
+  } else {
+    // 워터펌프 동작 로직 추가 (예: 시간 제한)
+    if (pumpState == PUMP_OFF && (millis() - pumpStartTime) > 5000) {
+      digitalWrite(A_IA, HIGH);
+      digitalWrite(A_IB, LOW);
+      pumpState = PUMP_ON;
+      pumpStartTime = millis();
+      Serial.println("Water Pump ON");
+    }
+  }
+
+  delay(100);
+}
